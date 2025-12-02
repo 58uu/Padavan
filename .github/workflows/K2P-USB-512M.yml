@@ -1,64 +1,64 @@
-名称: CI
+name: CI
 
-# 控制何时运行此操作。
-在：
-  推送:
-  拉取请求:
-  工作流_派送:
-    输入：
-      调试已启用:
-        描述: '启用tmate调试运行构建 (https://github.com/marketplace/actions/debugging-with-tmate)'     
-        必填： false
-        默认值：'no'
-  发布:
-    类型：[已发布]
+# Controls when the action will run. 
+on: 
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'     
+        required: false
+        default: 'no'
+  release:
+    types: [published]
 
-# 工作流运行由一个或多个作业组成，这些作业可以串行或并行运行
-工作:
-  构建:
-    名称：构建 K2P-USB-512M
-    运行于: ubuntu-20.04
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  build:
+    name: Build K2P-USB-512M
+    runs-on: ubuntu-20.04
     if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
-    环境:
+    env:
       build_variant: "mt7621-usb-512m"  # 自定义变体名称（区分512M内存）
-      目标: "K2P-USB-512M"           # 仅编译目标设备（与你的配置文件名一致）
+      targets: "K2P-USB-512M"           # 仅编译目标设备（与你的配置文件名一致）
       images_dir: /opt/images
-    战略：
-      矩阵:
-        包含:
+    strategy:
+      matrix:
+        include:
           # 仅保留目标设备的配置，删除其他所有平台/设备
           - build_variant: "mt7621-usb-512m"
-            目标: "K2P-USB-512M"
-            平台: "mt7621"           # 核心平台（MT7621）
+            targets: "K2P-USB-512M"
+            platform: "mt7621"           # 核心平台（MT7621）
             ram_size: "524288"           # 512M内存（单位：KB，512*1024=524288）
             flash_size: "16384"          # K2P默认16M闪存（16*1024=16384）
-    步骤：
-      - 使用：actions/checkout@v2
+    steps:
+      - uses: actions/checkout@v2
       
-      - name: 准备环境 (安装依赖)
-        运行: |
-          请将以下文本翻译成中文:           sudo apt update
+      - name: Prepare environment (安装依赖)
+        run: |
+          sudo apt update
           # 补充Padavan编译必需依赖（避免缺失）
-          sudo apt install -y libtool-bin gperf python3-docutils autopoint gettext
+          sudo apt install -y libtool-bin gperf python3-docutils autopoint gettext \
           build-essential gawk gcc-multilib g++-multilib libncurses5-dev libssl-dev \
           lib32z1-dev zlib1g-dev flex bison git-core subversion automake autoconf \
           texinfo pkg-config wget curl unzip xz-utils libelf-dev libglib2.0-dev python2.7
           # 配置Python2软链接（Padavan强制依赖）
           sudo ln -sf /usr/bin/python2.7 /usr/bin/python
 
-      - name: 运行 shellcheck (脚本语法检查，可选保留)
-        运行: sh ./trunk/tools/shellcheck.sh || echo "Shellcheck警告忽略，继续编译"
+      - name: Run shellcheck (脚本语法检查，可选保留)
+        run: sh ./trunk/tools/shellcheck.sh || echo "Shellcheck警告忽略，继续编译"
 
-      - name: 准备工具链 (下载MT7621工具链)
-        运行: |
+      - name: Prepare toolchain (下载MT7621工具链)
+        run: |
           cd toolchain-mipsel
           sh dl_toolchain.sh  # 下载MIPS架构工具链（适配MT7621）
 
-      - name: 设置 tmate 会话（调试模式，保留原功能）
-        用途：mxschmitt/action-tmate@v3
+      - name: Setup tmate session (调试模式，保留原功能)
+        uses: mxschmitt/action-tmate@v3
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled == 'yes' }}
-        与：
-          限制访问演员：真
+        with:
+          limit-access-to-actor: true
 
       - name: 适配512M内存配置（关键步骤）
         run: |
