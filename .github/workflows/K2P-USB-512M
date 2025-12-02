@@ -1,0 +1,127 @@
+name: CI
+
+# Controls when the action will run. 
+on: 
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'     
+        required: false
+        default: 'no'
+  release:
+    types: [published]
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  build:
+    name: Build K2P-USB-512M
+    runs-on: ubuntu-20.04
+    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
+    env:
+      build_variant: "mt7621-usb-512m"  # 自定义变体名称（区分512M内存）
+      targets: "K2P-USB-512M"           # 仅编译目标设备（与你的配置文件名一致）
+      images_dir: /opt/images
+    strategy:
+      matrix:
+        include:
+          # 仅保留目标设备的配置，删除其他所有平台/设备
+          - build_variant: "mt7621-usb-512m"
+            targets: "K2P-USB-512M"
+            platform: "mt7621"           # 核心平台（MT7621）
+            ram_size: "524288"           # 512M内存（单位：KB，512*1024=524288）
+            flash_size: "16384"          # K2P默认16M闪存（16*1024=16384）
+    steps:
+      - uses: actions/checkout@v2
+      
+      - name: Prepare environment (安装依赖)
+        run: |
+          sudo apt update
+          # 补充Padavan编译必需依赖（避免缺失）
+          sudo apt install -y libtool-bin gperf python3-docutils autopoint gettext \
+          build-essential gawk gcc-multilib g++-multilib libncurses5-dev libssl-dev \
+          lib32z1-dev zlib1g-dev flex bison git-core subversion automake autoconf \
+          texinfo pkg-config wget curl unzip xz-utils libelf-dev libglib2.0-dev python2.7
+          # 配置Python2软链接（Padavan强制依赖）
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+
+      - name: Run shellcheck (脚本语法检查，可选保留)
+        run: sh ./trunk/tools/shellcheck.sh || echo "Shellcheck警告忽略，继续编译"
+
+      - name: Prepare toolchain (下载MT7621工具链)
+        run: |
+          cd toolchain-mipsel
+          sh dl_toolchain.sh  # 下载MIPS架构工具链（适配MT7621）
+
+      - name: Setup tmate session (调试模式，保留原功能)
+        uses: mxschmitt/action-tmate@v3
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled == 'yes' }}
+        with:
+          limit-access-to-actor: true
+
+      - name: 适配512M内存配置（关键步骤）
+        run: |
+          # 假设你的配置文件在 trunk/configs/templates/K2P-USB-512M.config
+          # 若配置文件中未指定RAM_SIZE，手动添加/修改（避免编译为默认128M）
+          CONFIG_FILE="trunk/configs/templates/${{ matrix.targets }}.config"
+          if [ -f "$CONFIG_FILE" ]; then
+            # 修改内存大小为512M，闪存16M
+            sed -i "s/^RAM_SIZE=.*/RAM_SIZE=${{ matrix.ram_size }}/" "$CONFIG_FILE"
+            sed -i "s/^FLASH_SIZE=.*/FLASH_SIZE=${{ matrix.flash_size }}/" "$CONFIG_FILE"
+            # 确保启用USB功能（若配置文件中未开启）
+            sed -i "s/^CONFIG_FIRMWARE_ENABLE_USB=.*/CONFIG_FIRMWARE_ENABLE_USB=y/" "$CONFIG_FILE"
+            echo "已更新配置文件：$CONFIG_FILE，内存=${{ matrix.ram_size }}KB，闪存=${{ matrix.flash_size }}KB"
+          else
+            echo "错误：未找到配置文件 $CONFIG_FILE，请确认文件路径和名称"
+            exit 1
+          fi
+
+      - name: Start build (编译K2P-USB-512M固件)
+        run: |
+          cd trunk
+          mkdir -p ${images_dir}
+          # 循环编译（仅1个目标设备，实际只执行1次）
+          for m in $targets; do
+            echo "开始编译设备：$m"
+            fakeroot ./build_firmware_ci $m  # 调用CI编译脚本
+            if [ $? = 0 ]; then
+              # 复制编译产物到输出目录（Padavan固件为.trx格式）
+              cp -f images/*.trx ${images_dir}/$m.trx
+              # 若生成.bin格式，也一并复制（部分设备支持）
+              [ -f images/*.bin ] && cp -f images/*.bin ${images_dir}/$m.bin
+              echo "$m 编译成功"
+            else
+              echo "$m 编译失败"
+              exit 1
+            fi
+            ./clear_tree_simple >/dev/null 2>&1  # 清理编译残留
+          done
+
+      - name: Create archive (生成压缩包)
+        if: ${{ github.event_name != 'release' && success() }}
+        run: |
+          ls -lh ${images_dir}
+          # 生成带版本号的压缩包名称（Git短SHA）
+          GIT_VERSION=`git rev-parse --short=7 HEAD 2>/dev/null` || GIT_VERSION="unknown"
+          image_name=Padavan-K2P-USB-512M_${GIT_VERSION}
+          cd ${images_dir}; md5sum *.trx *.bin | tee md5sum.txt
+          7z a -mx=9 ${image_name}.7z ./*  # 压缩固件和校验文件
+          echo "image_name=${image_name}" >> $GITHUB_ENV
+
+      - name: Upload images to Artifact (上传到Actions产物)
+        if: ${{ github.event_name != 'release' && success() }}
+        uses: actions/upload-artifact@v2.2.1
+        with:
+          name: ${{ env.image_name }}
+          path: ${{ env.images_dir }}/*.7z
+
+      - name: Upload images to Releases (发布时上传到Release)
+        if: ${{ github.event_name == 'release' && success() }}
+        uses: svenstaro/upload-release-action@2.2.0
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.images_dir }}/*.trx
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
